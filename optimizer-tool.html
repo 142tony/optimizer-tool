@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTML 圖片極限瘦身工具</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --bg: #f8fafc;
+            --surface: #ffffff;
+            --text: #1e293b;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            background: var(--surface);
+            padding: 30px;
+            border-radius: 16px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 600px;
+            text-align: center;
+        }
+
+        h1 { margin-top: 0; color: var(--primary); }
+        p { color: #64748b; margin-bottom: 2rem; }
+
+        .upload-box {
+            border: 2px dashed #cbd5e1;
+            border-radius: 12px;
+            padding: 40px;
+            cursor: pointer;
+            transition: all 0.2s;
+            position: relative;
+        }
+
+        .upload-box:hover, .upload-box.dragover {
+            border-color: var(--primary);
+            background-color: #eff6ff;
+        }
+
+        .upload-box input {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            top: 0;
+            left: 0;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        .settings {
+            margin: 20px 0;
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: 0.2s;
+            display: none; /* 預設隱藏 */
+        }
+
+        .btn:hover { background-color: #1d4ed8; }
+        
+        .btn:disabled { 
+            background-color: #94a3b8; 
+            cursor: not-allowed; 
+        }
+
+        #logArea {
+            margin-top: 20px;
+            text-align: left;
+            background: #1e293b;
+            color: #4ade80;
+            font-family: monospace;
+            padding: 15px;
+            border-radius: 8px;
+            height: 200px;
+            overflow-y: auto;
+            font-size: 0.85rem;
+            display: none;
+        }
+
+        .stats {
+            margin-top: 15px;
+            font-weight: bold;
+            color: var(--primary);
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🖼️ HTML 圖片極限瘦身器</h1>
+    <p>上傳你的 SingleFile HTML，自動將圖片縮小並加入 CSS 拉伸效果。</p>
+
+    <div class="settings">
+        <label>
+            目標寬度: <input type="number" id="targetWidth" value="60" style="width: 50px; padding: 5px;"> px
+        </label>
+        <label>
+            WebP 品質: <input type="number" id="quality" value="0.2" step="0.1" max="1" min="0.1" style="width: 50px; padding: 5px;"> (0.1-1.0)
+        </label>
+    </div>
+
+    <div class="upload-box" id="dropZone">
+        <input type="file" id="fileInput" accept=".html,.htm">
+        <div id="uploadText">
+            📁 點擊或拖曳 HTML 檔案至此<br>
+            <span style="font-size: 0.8rem; color: #94a3b8">(限 SingleFile 格式)</span>
+        </div>
+    </div>
+
+    <div id="logArea"></div>
+    <div class="stats" id="statsArea"></div>
+    <button id="downloadBtn" class="btn">⬇️ 下載處理後的檔案</button>
+</div>
+
+<script>
+    // --- 核心邏輯 ---
+    const fileInput = document.getElementById('fileInput');
+    const dropZone = document.getElementById('dropZone');
+    const logArea = document.getElementById('logArea');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const uploadText = document.getElementById('uploadText');
+    const statsArea = document.getElementById('statsArea');
+
+    let originalFileName = '';
+
+    // 拖曳效果
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        dropZone.addEventListener(eventName, preventDefaults, false);
+    });
+    function preventDefaults(e) { e.preventDefault(); e.stopPropagation(); }
+    ['dragenter', 'dragover'].forEach(() => dropZone.classList.add('dragover'));
+    ['dragleave', 'drop'].forEach(() => dropZone.classList.remove('dragover'));
+
+    // 檔案監聽
+    fileInput.addEventListener('change', handleFiles);
+    dropZone.addEventListener('drop', (e) => {
+        const dt = e.dataTransfer;
+        const files = dt.files;
+        handleFiles({ target: { files: files } });
+    });
+
+    async function handleFiles(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        originalFileName = file.name.replace('.html', '').replace('.htm', '');
+        
+        // UI 重置
+        logArea.style.display = 'block';
+        downloadBtn.style.display = 'none';
+        statsArea.textContent = '';
+        log(`🚀 開始讀取: ${file.name} (${(file.size/1024/1024).toFixed(2)} MB)`);
+
+        const text = await file.text();
+        await processHTML(text, file.size);
+    }
+
+    // 📝 記錄 Log
+    function log(msg) {
+        logArea.innerHTML += `<div>${msg}</div>`;
+        logArea.scrollTop = logArea.scrollHeight;
+    }
+
+    /**
+     * 主處理函式
+     */
+    async function processHTML(htmlContent, originalSize) {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(htmlContent, 'text/html');
+        const images = doc.querySelectorAll('img');
+        
+        const targetWidth = parseInt(document.getElementById('targetWidth').value) || 60;
+        const targetQuality = parseFloat(document.getElementById('quality').value) || 0.2;
+
+        let processedCount = 0;
+        const tasks = [];
+
+        // 篩選出 Base64 圖片
+        images.forEach((img, index) => {
+            const src = img.getAttribute('src');
+            if (src && src.startsWith('data:image')) {
+                tasks.push({ img, src, index });
+            }
+        });
+
+        log(`🔍 找到 ${tasks.length} 張 Base64 圖片，開始壓縮...`);
+
+        for (let i = 0; i < tasks.length; i++) {
+            const task = tasks[i];
+            try {
+                // 1. 壓縮圖片
+                const newBase64 = await compressImage(task.src, targetWidth, targetQuality);
+                
+                // 2. 替換 src
+                task.img.setAttribute('src', newBase64);
+
+                // 3. 加入強制拉伸樣式 (關鍵！)
+                task.img.style.width = '100%';
+                task.img.style.height = 'auto';
+                task.img.style.objectFit = 'contain';
+                task.img.style.display = 'block';
+
+                // 4. 清理屬性
+                task.img.removeAttribute('srcset');
+                task.img.removeAttribute('width');
+                task.img.removeAttribute('height');
+
+                processedCount++;
+                if (processedCount % 10 === 0 || processedCount === tasks.length) {
+                    log(`⏳ 進度: ${processedCount} / ${tasks.length}`);
+                }
+            } catch (err) {
+                log(`⚠️ 圖片 ${i} 處理失敗: ${err.message}`);
+            }
+        }
+
+        // 產生新檔案
+        const serializer = new XMLSerializer();
+        const newHtml = serializer.serializeToString(doc);
+        const blob = new Blob([newHtml], { type: 'text/html' });
+        const newSize = blob.size;
+
+        // 統計
+        const saved = originalSize - newSize;
+        const percent = ((saved / originalSize) * 100).toFixed(1);
+        
+        log(`✅ 完成！`);
+        statsArea.innerHTML = `
+            原始: ${(originalSize/1024/1024).toFixed(2)} MB ➝ 
+            優化後: ${(newSize/1024/1024).toFixed(2)} MB 
+            <br>🔻 減少了 ${(saved/1024/1024).toFixed(2)} MB (-${percent}%)
+        `;
+
+        // 準備下載按鈕
+        const url = URL.createObjectURL(blob);
+        downloadBtn.onclick = () => {
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${originalFileName}_optimized.html`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        };
+        downloadBtn.style.display = 'inline-block';
+    }
+
+    /**
+     * 使用 Canvas 壓縮圖片
+     */
+    function compressImage(base64Src, width, quality) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.src = base64Src;
+            
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                // 計算等比例高度 (雖然我們會強制 resize 到 width，但 canvas 比例要對)
+                const scaleFactor = width / img.width;
+                // 如果原圖比目標還小，就不放大，直接回傳原圖 (避免模糊)
+                if (img.width <= width) {
+                    // 但我們還是想要轉成 WebP 節省空間，所以繼續執行
+                }
+
+                canvas.width = width;
+                canvas.height = img.height * scaleFactor;
+
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+                // 轉出 WebP
+                // 注意：部分舊瀏覽器不支援 image/webp，會自動退回 image/png
+                const newDataUrl = canvas.toDataURL('image/webp', quality);
+                resolve(newDataUrl);
+            };
+
+            img.onerror = (e) => reject(new Error('Image load error'));
+        });
+    }
+</script>
+
+</body>
+</html>
