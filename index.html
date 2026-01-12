@@ -187,12 +187,11 @@
     }
 
     /**
-     * 主處理函式
+     * 主處理函式 (增強版：支援 img 標籤與 background-image)
      */
     async function processHTML(htmlContent, originalSize) {
         const parser = new DOMParser();
         const doc = parser.parseFromString(htmlContent, 'text/html');
-        const images = doc.querySelectorAll('img');
         
         const targetWidth = parseInt(document.getElementById('targetWidth').value) || 60;
         const targetQuality = parseFloat(document.getElementById('quality').value) || 0.2;
@@ -200,52 +199,78 @@
         let processedCount = 0;
         const tasks = [];
 
-        // 篩選出 Base64 圖片
+        // 1. 抓取標準 <img> 標籤
+        const images = doc.querySelectorAll('img');
         images.forEach((img, index) => {
             const src = img.getAttribute('src');
             if (src && src.startsWith('data:image')) {
-                tasks.push({ img, src, index });
+                tasks.push({ type: 'img', node: img, data: src, index });
             }
         });
 
-        log(`🔍 找到 ${tasks.length} 張 Base64 圖片，開始壓縮...`);
+        // 2. 抓取 inline style 的 background-image
+        // 例如: <div style="background-image: url('data:image...')">
+        const allElements = doc.querySelectorAll('*[style*="url"]');
+        allElements.forEach((el, index) => {
+            const style = el.getAttribute('style');
+            const match = style.match(/url\(['"]?(data:image[^'"]+)['"]?\)/);
+            if (match && match[1]) {
+                tasks.push({ type: 'bg', node: el, data: match[1], index });
+            }
+        });
+
+        log(`🔍 找到 ${tasks.length} 個圖片資源 (Img: ${images.length}, Bg: ${tasks.length - images.length})，開始壓縮...`);
+
+        if (tasks.length === 0) {
+            log(`⚠️ 警告：找不到任何 Base64 圖片。請確認 SingleFile 是否將圖片轉為 SVG 或外部連結。`);
+            return;
+        }
 
         for (let i = 0; i < tasks.length; i++) {
             const task = tasks[i];
             try {
-                // 1. 壓縮圖片
-                const newBase64 = await compressImage(task.src, targetWidth, targetQuality);
+                // 壓縮圖片
+                const newBase64 = await compressImage(task.data, targetWidth, targetQuality);
                 
-                // 2. 替換 src
-                task.img.setAttribute('src', newBase64);
-
-                // 3. 加入強制拉伸樣式 (關鍵！)
-                task.img.style.width = '100%';
-                task.img.style.height = 'auto';
-                task.img.style.objectFit = 'contain';
-                task.img.style.display = 'block';
-
-                // 4. 清理屬性
-                task.img.removeAttribute('srcset');
-                task.img.removeAttribute('width');
-                task.img.removeAttribute('height');
+                if (task.type === 'img') {
+                    // 處理 <img>
+                    task.node.setAttribute('src', newBase64);
+                    task.node.style.width = '100%';
+                    task.node.style.height = 'auto';
+                    task.node.style.objectFit = 'contain';
+                    task.node.style.display = 'block';
+                    
+                    task.node.removeAttribute('srcset');
+                    task.node.removeAttribute('width');
+                    task.node.removeAttribute('height');
+                } else if (task.type === 'bg') {
+                    // 處理 background-image
+                    // 替換 style 字串中的舊 Base64
+                    const oldStyle = task.node.getAttribute('style');
+                    // 簡單替換 (注意：這裡假設 style 裡只有一個 url，如果有複雜 CSS 可能需要更嚴謹的正則)
+                    const newStyle = oldStyle.replace(task.data, newBase64);
+                    task.node.setAttribute('style', newStyle);
+                    
+                    // 背景圖通常需要 cover/contain 設定
+                    task.node.style.backgroundSize = 'contain'; 
+                    task.node.style.backgroundRepeat = 'no-repeat';
+                }
 
                 processedCount++;
                 if (processedCount % 10 === 0 || processedCount === tasks.length) {
                     log(`⏳ 進度: ${processedCount} / ${tasks.length}`);
                 }
             } catch (err) {
-                log(`⚠️ 圖片 ${i} 處理失敗: ${err.message}`);
+                log(`⚠️ 資源 ${i} 處理失敗: ${err.message}`);
             }
         }
 
-        // 產生新檔案
+        // --- 以下產生檔案邏輯不變 ---
         const serializer = new XMLSerializer();
         const newHtml = serializer.serializeToString(doc);
         const blob = new Blob([newHtml], { type: 'text/html' });
         const newSize = blob.size;
 
-        // 統計
         const saved = originalSize - newSize;
         const percent = ((saved / originalSize) * 100).toFixed(1);
         
@@ -256,7 +281,6 @@
             <br>🔻 減少了 ${(saved/1024/1024).toFixed(2)} MB (-${percent}%)
         `;
 
-        // 準備下載按鈕
         const url = URL.createObjectURL(blob);
         downloadBtn.onclick = () => {
             const a = document.createElement('a');
