@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTML 雪碧圖 (Sprite) 極限壓縮工具</title>
+    <style>
+        :root { --primary: #8b5cf6; --bg: #f8fafc; --text: #1e293b; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: var(--bg); color: var(--text);
+            display: flex; flex-direction: column; align-items: center;
+            padding: 30px; line-height: 1.6;
+        }
+        .container {
+            background: white; padding: 2rem; border-radius: 1rem;
+            box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1);
+            max-width: 650px; width: 100%; text-align: center;
+        }
+        h1 { color: var(--primary); margin-top: 0; }
+        .upload-box {
+            border: 2px dashed #cbd5e1; border-radius: 12px;
+            padding: 40px; margin: 20px 0; cursor: pointer; position: relative;
+            background: #f1f5f9; transition: 0.2s;
+        }
+        .upload-box:hover { border-color: var(--primary); background: #f3e8ff; }
+        .upload-box input {
+            position: absolute; width: 100%; height: 100%; top: 0; left: 0; opacity: 0; cursor: pointer;
+        }
+        .controls {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 20px; text-align: left;
+        }
+        label { display: block; font-size: 0.9rem; margin-bottom: 5px; font-weight: bold; }
+        input[type="number"] { width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box;}
+        
+        .btn {
+            background: var(--primary); color: white; border: none;
+            padding: 12px 30px; border-radius: 8px; font-size: 1rem;
+            cursor: pointer; display: none; margin-top: 15px;
+        }
+        .btn:hover { filter: brightness(1.1); }
+        
+        #log {
+            background: #1e293b; color: #4ade80; text-align: left;
+            padding: 15px; border-radius: 8px; margin-top: 20px;
+            height: 200px; overflow-y: auto; font-family: monospace; font-size: 0.85rem;
+            display: none; white-space: pre-wrap;
+        }
+        .warning { color: #f59e0b; font-size: 0.9rem; background: #fffbeb; padding: 10px; border-radius: 6px; margin-bottom: 15px; border-left: 4px solid #f59e0b; text-align: left;}
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🎨 CSS 雪碧圖極限壓縮</h1>
+    <p>專門處理 SingleFile 儲存的色卡網頁，壓縮 CSS 中的背景大圖。</p>
+
+    <div class="warning">
+        <strong>⚠️ 注意：</strong> 這是「大圖」，請不要將寬度設得太小 (如 60px)，否則所有色塊都會糊成一團。
+        <br>建議：先嘗試 <strong>寬度 1024 或 2048</strong>，主要靠「WebP 品質」來瘦身。
+    </div>
+
+    <div class="controls">
+        <div>
+            <label>最大寬度 (px)</label>
+            <input type="number" id="maxWidth" value="2048" placeholder="預設不縮放">
+            <small style="color:#64748b">若原圖更小則不放大</small>
+        </div>
+        <div>
+            <label>WebP 品質 (0.1 - 1.0)</label>
+            <input type="number" id="quality" value="0.3" step="0.1" max="1" min="0.1">
+        </div>
+    </div>
+
+    <div class="upload-box" id="dropZone">
+        <input type="file" id="fileInput" accept=".html,.htm">
+        <div id="uploadText">
+            📁 拖曳 HTML 檔案至此<br>
+            <span style="font-size:0.8rem;color:#64748b">支援 CSS background-image 提取</span>
+        </div>
+    </div>
+
+    <div id="log"></div>
+    <div id="stats" style="margin-top:15px; font-weight:bold; color:var(--primary)"></div>
+    <button id="downloadBtn" class="btn">⬇️ 下載壓縮後的檔案</button>
+</div>
+
+<script>
+    const fileInput = document.getElementById('fileInput');
+    const logArea = document.getElementById('log');
+    const downloadBtn = document.getElementById('downloadBtn');
+    let originalFileName = '';
+
+    fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        originalFileName = file.name.replace(/\.html?$/i, '');
+        
+        logArea.style.display = 'block';
+        logArea.textContent = '';
+        downloadBtn.style.display = 'none';
+        document.getElementById('stats').textContent = '';
+
+        log(`🚀 讀取檔案: ${file.name} (${(file.size/1024/1024).toFixed(2)} MB)`);
+        const text = await file.text();
+        await processSpriteHTML(text, file.size);
+    });
+
+    function log(msg) {
+        logArea.textContent += msg + '\n';
+        logArea.scrollTop = logArea.scrollHeight;
+    }
+
+    async function processSpriteHTML(htmlContent, originalSize) {
+        const maxWidth = parseInt(document.getElementById('maxWidth').value) || 2048;
+        const quality = parseFloat(document.getElementById('quality').value) || 0.3;
+
+        // 1. 正則表達式抓取所有 Base64 圖片 (支援 CSS url() 和 img src)
+        // 捕捉格式: url("data:image/...") 或 src="data:image/..."
+        const regex = /(url\(['"]?|src=["'])(data:image\/[^;]+;base64,[^"'\)]+)(['"]?\)|["'])/g;
+        
+        // 找出所有不重複的圖片 (通常雪碧圖只有一張很大的)
+        const matches = [...htmlContent.matchAll(regex)];
+        const uniqueImages = new Map(); // key: oldBase64, value: newBase64
+
+        log(`🔍 掃描代碼... 共發現 ${matches.length} 處圖片引用`);
+
+        for (const match of matches) {
+            const fullBase64 = match[2];
+            if (!uniqueImages.has(fullBase64)) {
+                uniqueImages.set(fullBase64, null); // 標記為待處理
+            }
+        }
+
+        const totalUnique = uniqueImages.size;
+        log(`📦 實際獨立圖片數量: ${totalUnique} 張 (其餘為重複引用)`);
+        
+        if (totalUnique === 0) {
+            log('❌ 找不到任何 Base64 圖片，請確認檔案格式。');
+            return;
+        }
+
+        // 2. 開始壓縮
+        let processed = 0;
+        for (const [oldBase64, _] of uniqueImages) {
+            processed++;
+            log(`⚙️ 正在壓縮第 ${processed}/${totalUnique} 張圖片...`);
+            
+            try {
+                const newBase64 = await compressImage(oldBase64, maxWidth, quality);
+                uniqueImages.set(oldBase64, newBase64);
+                
+                // 計算單張壓縮率
+                const oldSize = oldBase64.length;
+                const newSize = newBase64.length;
+                const ratio = Math.round((1 - newSize/oldSize) * 100);
+                log(`   └─ 壓縮率: -${ratio}%`);
+
+            } catch (err) {
+                log(`   ⚠️ 失敗: ${err.message} (保留原圖)`);
+            }
+        }
+
+        // 3. 全文替換
+        log(`📝 正在重組 HTML...`);
+        let newHtml = htmlContent;
+        for (const [oldBase64, newBase64] of uniqueImages) {
+            if (newBase64) {
+                // 使用 split/join 進行全域替換，比 replaceAll 安全一點 (避免正則特殊字元)
+                newHtml = newHtml.split(oldBase64).join(newBase64);
+            }
+        }
+
+        // 4. 統計與下載
+        const blob = new Blob([newHtml], { type: 'text/html' });
+        const newSize = blob.size;
+        const saved = originalSize - newSize;
+        
+        document.getElementById('stats').innerHTML = `
+            原始: ${(originalSize/1024/1024).toFixed(2)} MB  ➜  
+            現在: ${(newSize/1024/1024).toFixed(2)} MB 
+            (瘦身 -${((saved/originalSize)*100).toFixed(1)}%)
+        `;
+        
+        log(`✅ 處理完成！`);
+        
+        const url = URL.createObjectURL(blob);
+        downloadBtn.onclick = () => {
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${originalFileName}_sprite_optimized.html`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        };
+        downloadBtn.style.display = 'inline-block';
+    }
+
+    function compressImage(base64, maxWidth, quality) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                let w = img.width;
+                let h = img.height;
+
+                // 保持比例縮放
+                if (w > maxWidth) {
+                    h = Math.round(h * (maxWidth / w));
+                    w = maxWidth;
+                }
+
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, w, h);
+
+                // 嘗試轉為 WebP
+                resolve(canvas.toDataURL('image/webp', quality));
+            };
+            img.onerror = () => reject(new Error('圖片載入失敗'));
+            img.src = base64;
+        });
+    }
+</script>
+
+</body>
+</html>
