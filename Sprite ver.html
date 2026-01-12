@@ -90,20 +90,36 @@
     const logArea = document.getElementById('log');
     const downloadBtn = document.getElementById('downloadBtn');
     let originalFileName = '';
+    let currentBlobUrl = null; // 用來儲存當前的下載連結
 
     fileInput.addEventListener('change', async (e) => {
         const file = e.target.files[0];
         if (!file) return;
-        originalFileName = file.name.replace(/\.html?$/i, '');
         
+        // 1. 取得主檔名，並移除可能導致錯誤的特殊字元
+        originalFileName = file.name.replace(/\.html?$/i, '').replace(/[\\/:*?"<>|]/g, '_');
+        
+        // 重置 UI
         logArea.style.display = 'block';
         logArea.textContent = '';
         downloadBtn.style.display = 'none';
         document.getElementById('stats').textContent = '';
 
+        // 釋放舊的記憶體
+        if (currentBlobUrl) {
+            URL.revokeObjectURL(currentBlobUrl);
+            currentBlobUrl = null;
+        }
+
         log(`🚀 讀取檔案: ${file.name} (${(file.size/1024/1024).toFixed(2)} MB)`);
-        const text = await file.text();
-        await processSpriteHTML(text, file.size);
+        
+        try {
+            const text = await file.text();
+            await processSpriteHTML(text, file.size);
+        } catch (err) {
+            log(`❌ 發生錯誤: ${err.message}`);
+            console.error(err);
+        }
     });
 
     function log(msg) {
@@ -115,63 +131,49 @@
         const maxWidth = parseInt(document.getElementById('maxWidth').value) || 2048;
         const quality = parseFloat(document.getElementById('quality').value) || 0.3;
 
-        // 1. 正則表達式抓取所有 Base64 圖片 (支援 CSS url() 和 img src)
-        // 捕捉格式: url("data:image/...") 或 src="data:image/..."
         const regex = /(url\(['"]?|src=["'])(data:image\/[^;]+;base64,[^"'\)]+)(['"]?\)|["'])/g;
-        
-        // 找出所有不重複的圖片 (通常雪碧圖只有一張很大的)
         const matches = [...htmlContent.matchAll(regex)];
-        const uniqueImages = new Map(); // key: oldBase64, value: newBase64
+        const uniqueImages = new Map();
 
         log(`🔍 掃描代碼... 共發現 ${matches.length} 處圖片引用`);
 
         for (const match of matches) {
             const fullBase64 = match[2];
             if (!uniqueImages.has(fullBase64)) {
-                uniqueImages.set(fullBase64, null); // 標記為待處理
+                uniqueImages.set(fullBase64, null);
             }
         }
 
         const totalUnique = uniqueImages.size;
-        log(`📦 實際獨立圖片數量: ${totalUnique} 張 (其餘為重複引用)`);
+        log(`📦 實際獨立圖片數量: ${totalUnique} 張`);
         
         if (totalUnique === 0) {
             log('❌ 找不到任何 Base64 圖片，請確認檔案格式。');
             return;
         }
 
-        // 2. 開始壓縮
         let processed = 0;
         for (const [oldBase64, _] of uniqueImages) {
             processed++;
-            log(`⚙️ 正在壓縮第 ${processed}/${totalUnique} 張圖片...`);
+            if (processed % 5 === 0) log(`⚙️ 正在壓縮... (${processed}/${totalUnique})`);
             
             try {
                 const newBase64 = await compressImage(oldBase64, maxWidth, quality);
                 uniqueImages.set(oldBase64, newBase64);
-                
-                // 計算單張壓縮率
-                const oldSize = oldBase64.length;
-                const newSize = newBase64.length;
-                const ratio = Math.round((1 - newSize/oldSize) * 100);
-                log(`   └─ 壓縮率: -${ratio}%`);
-
             } catch (err) {
-                log(`   ⚠️ 失敗: ${err.message} (保留原圖)`);
+                log(`   ⚠️ 圖片壓縮失敗 (跳過)`);
             }
         }
 
-        // 3. 全文替換
         log(`📝 正在重組 HTML...`);
         let newHtml = htmlContent;
         for (const [oldBase64, newBase64] of uniqueImages) {
             if (newBase64) {
-                // 使用 split/join 進行全域替換，比 replaceAll 安全一點 (避免正則特殊字元)
                 newHtml = newHtml.split(oldBase64).join(newBase64);
             }
         }
 
-        // 4. 統計與下載
+        // 建立 Blob 與下載連結
         const blob = new Blob([newHtml], { type: 'text/html' });
         const newSize = blob.size;
         const saved = originalSize - newSize;
@@ -182,16 +184,24 @@
             (瘦身 -${((saved/originalSize)*100).toFixed(1)}%)
         `;
         
-        log(`✅ 處理完成！`);
+        log(`✅ 處理完成！請點擊下方按鈕下載。`);
         
-        const url = URL.createObjectURL(blob);
+        // 產生全域 URL
+        currentBlobUrl = URL.createObjectURL(blob);
+        
+        // 綁定下載按鈕事件
         downloadBtn.onclick = () => {
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `${originalFileName}_sprite_optimized.html`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
+            try {
+                const a = document.createElement('a');
+                a.href = currentBlobUrl;
+                a.download = `${originalFileName}_optimized.html`; // 檔名已經過淨化
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            } catch (e) {
+                alert("下載觸發失敗，請按 F12 查看 Console 錯誤訊息。");
+                console.error(e);
+            }
         };
         downloadBtn.style.display = 'inline-block';
     }
@@ -204,7 +214,6 @@
                 let w = img.width;
                 let h = img.height;
 
-                // 保持比例縮放
                 if (w > maxWidth) {
                     h = Math.round(h * (maxWidth / w));
                     w = maxWidth;
@@ -214,11 +223,9 @@
                 canvas.height = h;
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(img, 0, 0, w, h);
-
-                // 嘗試轉為 WebP
                 resolve(canvas.toDataURL('image/webp', quality));
             };
-            img.onerror = () => reject(new Error('圖片載入失敗'));
+            img.onerror = () => reject(new Error('Image Error'));
             img.src = base64;
         });
     }
